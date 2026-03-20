@@ -165,7 +165,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             }
             return
         }
-        central.scanForPeripherals(withServices: [EUS_SVC], options: nil)
+        central.scanForPeripherals(withServices: nil, options: nil)
         scanTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
             self?.stopScan()
         }
