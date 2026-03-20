@@ -116,6 +116,15 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var mid = 0x14
     private var timeout: TimeInterval = 25
     private var touchReady = false
+    private let verbose: Bool
+
+    init(verbose: Bool = false) {
+        self.verbose = verbose
+    }
+
+    private func log(_ msg: String) {
+        if verbose { fputs(msg, stderr) }
+    }
 
     private func nextId() -> (Int, Int) {
         let s = seq, m = mid
@@ -148,7 +157,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let deadline = Date(timeIntervalSinceNow: timeout)
         while !done && RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1)) {
             if Date() > deadline {
-                fputs("Timeout\n", stderr)
+                log("Timeout\n")
                 return mode == .ask ? (touched ? 0 : 1) : (sent ? 0 : 1)
             }
         }
@@ -189,7 +198,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         if mode == .ask && name.contains("_L_") { return }
 
         let side = name.contains("_L_") ? "L" : name.contains("_R_") ? "R" : "?"
-        fputs("  \(side): \(name)\n", stderr)
+        log("  \(side): \(name)\n")
         peripherals.append(peripheral)
         peripheral.delegate = self
         central.connect(peripheral, options: nil)
@@ -237,7 +246,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             peripheral.writeValue(pkt, for: tx, type: .withoutResponse)
         }
         let side = peripheral.name?.contains("_L_") == true ? "L" : "R"
-        fputs("  \(side): authenticated\n", stderr)
+        log("  \(side): authenticated\n")
         authenticated += 1
 
         if authenticated >= peripherals.count {
@@ -261,11 +270,11 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let payload = data.subdata(in: 8..<(data.count - 2))
         guard payload.count > 2, payload[0] == 0x08, payload[1] == 0x08 else { return }
         let tt = touchType(payload)
-        fputs("  rx: 07-01 f10.f1=\(tt.map { String($0) } ?? "nil") ready=\(touchReady)\n", stderr)
+        log("  rx: 07-01 f10.f1=\(tt.map { String($0) } ?? "nil") ready=\(touchReady)\n")
         // Only f10.f1=2 (touch-down), ignore f10.f1=1 (held)
         guard tt == 0x02 else { return }
         guard touchReady else { return }  // drain period not elapsed yet
-        fputs("  touch detected\n", stderr)
+        log("  touch detected\n")
         touched = true
         disconnectAll()
     }
@@ -295,7 +304,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
                 guard let self = self else { return }
                 self.touchReady = true
-                fputs("  waiting for touch...\n", stderr)
+                log("  waiting for touch...\n")
             }
             // Ask timeout
             let askTimeout = self.timeout - 15
@@ -310,7 +319,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 self.writeAll(aiReply(rs, rm, self.text))
                 self.sent = true
                 let label = self.peripherals.count > 1 ? "L+R" : (self.peripherals.first?.name?.contains("_L_") == true ? "L" : "R")
-                print("  \(label): sent")
+                self.log("  \(label): sent\n")
                 self.startTextKeepalive()
             }
         }

@@ -1,22 +1,24 @@
 import Foundation
 
-let args = CommandLine.arguments
-guard args.count >= 3 else {
-    fputs("Usage: even text \"message\"\n", stderr)
-    fputs("       even ask \"question?\" [timeout_sec]\n", stderr)
+var rawArgs = Array(CommandLine.arguments.dropFirst())
+let verbose = rawArgs.contains("-v") || rawArgs.contains("--verbose")
+rawArgs.removeAll { $0 == "-v" || $0 == "--verbose" }
+
+guard rawArgs.count >= 2 else {
+    fputs("Usage: even [-v] text \"message\"\n", stderr)
+    fputs("       even [-v] ask \"question?\" [timeout_sec]\n", stderr)
     exit(2)
 }
 
-let cmd = args[1]
-let ble = GlassesBLE()
+let cmd = rawArgs[0]
+let ble = GlassesBLE(verbose: verbose)
 
 switch cmd {
 case "text":
-    let text = args[2...].joined(separator: " ")
+    let text = rawArgs[1...].joined(separator: " ")
     exit(ble.send(text))
 case "ask":
-    // Last arg is timeout if it's a number
-    var textArgs = args[2...]
+    var textArgs = rawArgs[1...]
     var timeout: TimeInterval = 30
     if textArgs.count > 1, let t = TimeInterval(textArgs.last!) {
         timeout = t
