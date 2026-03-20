@@ -81,6 +81,10 @@ private func aiHeartbeat(_ seq: Int, _ mid: Int) -> Data {
     packet(seq, 0x07, 0x20, vi(1, 9) + vi(2, mid))
 }
 
+private func aiExit(_ seq: Int, _ mid: Int) -> Data {
+    packet(seq, 0x07, 0x20, vi(1,1) + vi(2,mid) + ld(3, vi(1,3)))
+}
+
 /// Extract f10.f1 from AI EVENT protobuf payload (touch type)
 private func touchType(_ payload: Data) -> UInt8? {
     let bytes = [UInt8](payload)
@@ -111,7 +115,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var seq = 8
     private var mid = 0x14
     private var timeout: TimeInterval = 25
-    private var touchCount = 0
+    private var touchReady = false
 
     private func nextId() -> (Int, Int) {
         let s = seq, m = mid
@@ -161,7 +165,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             }
             return
         }
-        central.scanForPeripherals(withServices: nil, options: nil)
+        central.scanForPeripherals(withServices: [EUS_SVC], options: nil)
         scanTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
             self?.stopScan()
         }
@@ -178,7 +182,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi: NSNumber) {
-        guard let name = peripheral.name, name.contains("G2") else { return }
+        guard let name = peripheral.name, name.hasPrefix("Even G2") else { return }
         guard !peripherals.contains(peripheral) else { return }
 
         // For ask mode, only connect to R eye (touch events are right-eye only)
@@ -257,15 +261,13 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         let payload = data.subdata(in: 8..<(data.count - 2))
         guard payload.count > 2, payload[0] == 0x08, payload[1] == 0x08 else { return }
         let tt = touchType(payload)
-        // f10.f1=2 = touch-down, f10.f1=1 = held
-        if tt == 0x01 || tt == 0x02 {
-            touchCount += 1
-            // Skip first touch event (startup phantom)
-            if touchCount <= 1 { return }
-            fputs("  touch detected\n", stderr)
-            touched = true
-            disconnectAll()
-        }
+        fputs("  rx: 07-01 f10.f1=\(tt.map { String($0) } ?? "nil") ready=\(touchReady)\n", stderr)
+        // Only f10.f1=2 (touch-down), ignore f10.f1=1 (held)
+        guard tt == 0x02 else { return }
+        guard touchReady else { return }  // drain period not elapsed yet
+        fputs("  touch detected\n", stderr)
+        touched = true
+        disconnectAll()
     }
 
     // MARK: - Display
@@ -288,11 +290,16 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 let (rs, rm) = self.nextId()
                 self.writeAll(aiReply(rs, rm, "[press+hold = yes]"))
                 self.sent = true
+            }
+            // Drain phantom events for 1.5s after display, then arm touch detection
+            Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+                guard let self = self else { return }
+                self.touchReady = true
                 fputs("  waiting for touch...\n", stderr)
             }
             // Ask timeout
             let askTimeout = self.timeout - 15
-            Timer.scheduledTimer(withTimeInterval: max(askTimeout, 5), repeats: false) { [weak self] _ in
+            Timer.scheduledTimer(withTimeInterval: max(askTimeout, 5) + 1.5, repeats: false) { [weak self] _ in
                 guard let self = self, !self.touched else { return }
                 self.disconnectAll()
             }
@@ -338,7 +345,15 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private func disconnectAll() {
         heartbeatTimer?.invalidate()
-        for p in peripherals { central.cancelPeripheralConnection(p) }
-        done = true
+        if mode == .ask {
+            let (s, m) = nextId()
+            writeAll(aiExit(s, m))
+        }
+        // Brief delay to let exit packet flush before disconnect
+        Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            for p in self.peripherals { self.central.cancelPeripheralConnection(p) }
+            self.done = true
+        }
     }
 }
