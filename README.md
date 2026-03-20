@@ -5,7 +5,7 @@ CLI to send text to [Even Realities G2](https://evenrealities.com) smart glasses
 ## Install
 
 ```sh
-brew install usiegj00/tap/even
+brew install aluminumio/tap/even
 ```
 
 ## Usage
@@ -42,7 +42,7 @@ Connects to G2 glasses via Bluetooth Low Energy, authenticates using the Even UA
 ## Build from source
 
 ```sh
-git clone https://github.com/usiegj00/even.git
+git clone https://github.com/aluminumio/even.git
 cd even
 swift build -c release
 # binary at .build/release/even
