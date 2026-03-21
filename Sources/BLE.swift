@@ -6,6 +6,10 @@ private let EUS_SVC = CBUUID(string: "00002760-08c2-11e1-9073-0e8ac72e5450")
 private let EUS_TX  = CBUUID(string: "00002760-08c2-11e1-9073-0e8ac72e5401")
 private let EUS_RX  = CBUUID(string: "00002760-08c2-11e1-9073-0e8ac72e5402")
 
+// Nordic UART Service (NUS) — raw gesture events (0xF5 prefix)
+private let NUS_SVC = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+private let NUS_RX  = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+
 // MARK: - Protobuf helpers
 
 private func varint(_ v: Int) -> Data {
@@ -211,7 +215,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        peripheral.discoverServices([EUS_SVC])
+        peripheral.discoverServices([EUS_SVC, NUS_SVC])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -223,15 +227,30 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     // MARK: - Peripheral
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        guard let svc = peripheral.services?.first(where: { $0.uuid == EUS_SVC }) else {
+        guard let svcs = peripheral.services else { return }
+        guard let eus = svcs.first(where: { $0.uuid == EUS_SVC }) else {
             fputs("EUS service not found\n", stderr)
             return
         }
-        peripheral.discoverCharacteristics([EUS_TX, EUS_RX], for: svc)
+        peripheral.discoverCharacteristics([EUS_TX, EUS_RX], for: eus)
+        if let nus = svcs.first(where: { $0.uuid == NUS_SVC }) {
+            peripheral.discoverCharacteristics([NUS_RX], for: nus)
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let chars = service.characteristics else { return }
+
+        // NUS service — just subscribe to RX for gesture events
+        if service.uuid == NUS_SVC {
+            if let rx = chars.first(where: { $0.uuid == NUS_RX }) {
+                peripheral.setNotifyValue(true, for: rx)
+                log("  NUS: subscribed\n")
+            }
+            return
+        }
+
+        // EUS service — auth + subscribe
         guard let tx = chars.first(where: { $0.uuid == EUS_TX }) else {
             fputs("EUS TX not found\n", stderr)
             return
@@ -259,22 +278,37 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     // MARK: - RX notifications (touch events)
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard characteristic.uuid == EUS_RX,
-              let data = characteristic.value, data.count >= 10 else { return }
+        guard let data = characteristic.value, !data.isEmpty else { return }
+        guard mode == .ask else { return }
+
+        // NUS gesture events: 0xF5 prefix (primary touch channel)
+        if characteristic.uuid == NUS_RX {
+            let bytes = [UInt8](data)
+            guard bytes.count >= 2, bytes[0] == 0xF5 else { return }
+            let gesture = bytes[1]
+            // 0x01=tap, 0x00=double-tap, 0x17=long-press
+            log("  rx: NUS F5 \(String(format:"%02X", gesture)) ready=\(touchReady)\n")
+            guard gesture == 0x01 || gesture == 0x00 || gesture == 0x17 else { return }
+            guard touchReady else { return }
+            log("  touch detected (NUS)\n")
+            touched = true
+            disconnectAll()
+            return
+        }
+
+        // EUS protobuf events: fallback touch channel
+        guard characteristic.uuid == EUS_RX, data.count >= 10 else { return }
         let bytes = [UInt8](data)
         guard bytes[0] == 0xAA else { return }
         let svcHi = bytes[6], svcLo = bytes[7]
-        guard mode == .ask else { return }
-        // Touch event: 0x07-01, type=8 (EVENT)
         guard svcHi == 0x07, svcLo == 0x01 else { return }
         let payload = data.subdata(in: 8..<(data.count - 2))
         guard payload.count > 2, payload[0] == 0x08, payload[1] == 0x08 else { return }
         let tt = touchType(payload)
         log("  rx: 07-01 f10.f1=\(tt.map { String($0) } ?? "nil") ready=\(touchReady)\n")
-        // Only f10.f1=2 (touch-down), ignore f10.f1=1 (held)
         guard tt == 0x02 else { return }
-        guard touchReady else { return }  // drain period not elapsed yet
-        log("  touch detected\n")
+        guard touchReady else { return }
+        log("  touch detected (EUS)\n")
         touched = true
         disconnectAll()
     }
