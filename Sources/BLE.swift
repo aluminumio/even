@@ -306,7 +306,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard payload.count > 2, payload[0] == 0x08, payload[1] == 0x08 else { return }
         let tt = touchType(payload)
         log("  rx: 07-01 f10.f1=\(tt.map { String($0) } ?? "nil") ready=\(touchReady)\n")
-        guard tt == 0x02 else { return }
+        guard tt == 0x01 || tt == 0x02 else { return }
         guard touchReady else { return }
         log("  touch detected (EUS)\n")
         touched = true
