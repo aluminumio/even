@@ -100,9 +100,53 @@ private func touchType(_ payload: Data) -> UInt8? {
     return nil
 }
 
+/// Decode protobuf fields from raw bytes
+private func decodeProto(_ data: Data) -> [(field: Int, wire: Int, value: String)] {
+    var fields: [(field: Int, wire: Int, value: String)] = []
+    let bytes = [UInt8](data)
+    var i = 0
+    while i < bytes.count {
+        let tag = Int(bytes[i]); i += 1
+        let field = tag >> 3, wire = tag & 0x07
+        switch wire {
+        case 0: // varint
+            var v = 0, shift = 0
+            while i < bytes.count {
+                let b = Int(bytes[i]); i += 1
+                v |= (b & 0x7F) << shift; shift += 7
+                if b & 0x80 == 0 { break }
+            }
+            fields.append((field, wire, "\(v)"))
+        case 2: // length-delimited
+            var len = 0, shift = 0
+            while i < bytes.count {
+                let b = Int(bytes[i]); i += 1
+                len |= (b & 0x7F) << shift; shift += 7
+                if b & 0x80 == 0 { break }
+            }
+            let end = min(i + len, bytes.count)
+            let sub = Data(bytes[i..<end])
+            let hex = sub.map { String(format: "%02X", $0) }.joined(separator: " ")
+            // Try to decode nested protobuf
+            let nested = decodeProto(sub)
+            if !nested.isEmpty && nested.allSatisfy({ $0.field > 0 && $0.field < 20 }) {
+                let inner = nested.map { "f\($0.field)=\($0.value)" }.joined(separator: " ")
+                fields.append((field, wire, "{\(inner)}"))
+            } else {
+                fields.append((field, wire, "[\(hex)]"))
+            }
+            i = end
+        default:
+            fields.append((field, wire, "?wire\(wire)"))
+            break
+        }
+    }
+    return fields
+}
+
 // MARK: - BLE
 
-enum Mode { case text, ask }
+enum Mode { case text, ask, dump }
 
 final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var central: CBCentralManager!
@@ -156,16 +200,25 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         return run()
     }
 
+    func dump(duration: TimeInterval = 30) -> Int32 {
+        self.text = "dump mode"
+        self.mode = .dump
+        self.timeout = duration + 15
+        return run()
+    }
+
     private func run() -> Int32 {
         central = CBCentralManager(delegate: self, queue: nil)
         let deadline = Date(timeIntervalSinceNow: timeout)
         while !done && RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1)) {
             if Date() > deadline {
                 log("Timeout\n")
-                return mode == .ask ? (touched ? 0 : 1) : (sent ? 0 : 1)
+                if mode == .ask { return touched ? 0 : 1 }
+                return sent ? 0 : 1
             }
         }
-        return mode == .ask ? (touched ? 0 : 1) : (sent ? 0 : 1)
+        if mode == .ask { return touched ? 0 : 1 }
+        return sent ? 0 : 1
     }
 
     // MARK: - Central
@@ -198,8 +251,8 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard let name = peripheral.name, name.hasPrefix("Even G2") else { return }
         guard !peripherals.contains(peripheral) else { return }
 
-        // For ask mode, only connect to R eye (touch events are right-eye only)
-        if mode == .ask && name.contains("_L_") { return }
+        // For ask/dump mode, only connect to R eye (touch events are right-eye only)
+        if (mode == .ask || mode == .dump) && name.contains("_L_") { return }
 
         let side = name.contains("_L_") ? "L" : name.contains("_R_") ? "R" : "?"
         log("  \(side): \(name)\n")
@@ -207,7 +260,7 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         peripheral.delegate = self
         central.connect(peripheral, options: nil)
 
-        let target = mode == .ask ? 1 : 2
+        let target = (mode == .ask || mode == .dump) ? 1 : 2
         if peripherals.count >= target {
             central.stopScan()
             scanTimer?.invalidate()
@@ -279,14 +332,24 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let data = characteristic.value, !data.isEmpty else { return }
-        guard mode == .ask else { return }
+        guard mode == .ask || mode == .dump else { return }
 
-        // NUS gesture events: 0xF5 prefix (primary touch channel)
+        // NUS gesture events: 0xF5 prefix
         if characteristic.uuid == NUS_RX {
             let bytes = [UInt8](data)
+            let hex = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+            if mode == .dump {
+                fputs("NUS  \(hex)\n", stderr)
+                if bytes.count >= 2 && bytes[0] == 0xF5 {
+                    let names: [UInt8: String] = [0x00:"double-tap", 0x01:"tap", 0x02:"slide-fwd",
+                        0x03:"slide-back", 0x04:"triple-tap-L", 0x05:"triple-tap-R",
+                        0x17:"long-press", 0x24:"release"]
+                    fputs("     gesture=0x\(String(format:"%02X", bytes[1])) \(names[bytes[1]] ?? "?")\n", stderr)
+                }
+                return
+            }
             guard bytes.count >= 2, bytes[0] == 0xF5 else { return }
             let gesture = bytes[1]
-            // 0x01=tap, 0x00=double-tap, 0x17=long-press
             log("  rx: NUS F5 \(String(format:"%02X", gesture)) ready=\(touchReady)\n")
             guard gesture == 0x01 || gesture == 0x00 || gesture == 0x17 else { return }
             guard touchReady else { return }
@@ -296,11 +359,24 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             return
         }
 
-        // EUS protobuf events: fallback touch channel
+        // EUS protobuf events
         guard characteristic.uuid == EUS_RX, data.count >= 10 else { return }
         let bytes = [UInt8](data)
         guard bytes[0] == 0xAA else { return }
         let svcHi = bytes[6], svcLo = bytes[7]
+
+        if mode == .dump {
+            let payload = data.subdata(in: 8..<(data.count - 2))
+            let hex = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
+            let svc = String(format: "%02X-%02X", svcHi, svcLo)
+            let fields = decodeProto(payload)
+            let decoded = fields.map { "f\($0.field)=\($0.value)" }.joined(separator: " ")
+            fputs("EUS  \(svc) seq=\(bytes[2]) len=\(bytes[3])  \(decoded)\n", stderr)
+            if verbose { fputs("     \(hex)\n", stderr) }
+            return
+        }
+
+        // Ask mode: touch detection
         guard svcHi == 0x07, svcLo == 0x01 else { return }
         let payload = data.subdata(in: 8..<(data.count - 2))
         guard payload.count > 2, payload[0] == 0x08, payload[1] == 0x08 else { return }
@@ -316,8 +392,20 @@ final class GlassesBLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     // MARK: - Display
 
     private func sendDisplay() {
-        let (s, m) = nextId()
-        writeAll(aiEnter(s, m))
+        if mode == .dump {
+            // Don't enter AI mode — just auth heartbeat to stay connected
+            heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                let (s, m) = self.nextId()
+                self.writeAll(authHeartbeat(s, m))
+            }
+            fputs("Listening for packets (\(Int(timeout - 15))s)...\n", stderr)
+            let dumpTimeout = self.timeout - 15
+            Timer.scheduledTimer(withTimeInterval: max(dumpTimeout, 5), repeats: false) { [weak self] _ in
+                self?.disconnectAll()
+            }
+            return
+        }
 
         if mode == .ask {
             // Start heartbeats immediately to keep AI alive
