@@ -1,21 +1,23 @@
 import Foundation
 
 var rawArgs = Array(CommandLine.arguments.dropFirst())
-let verbose = rawArgs.contains("-v") || rawArgs.contains("--verbose")
-rawArgs.removeAll { $0 == "-v" || $0 == "--verbose" }
+let verbose = rawArgs.contains("-v") || rawArgs.contains("--verbose") || rawArgs.contains("--debug")
+rawArgs.removeAll { $0 == "-v" || $0 == "--verbose" || $0 == "--debug" }
 
 guard rawArgs.count >= 1 else {
     fputs("Usage: even [-v] text \"message\"\n", stderr)
     fputs("       even [-v] ask \"question?\" [timeout_sec]\n", stderr)
     fputs("       even [-v] notify \"title\" \"message\" [timeout_sec]\n", stderr)
     fputs("       even [-v] dump [seconds]\n", stderr)
+    fputs("       even [-v] lab <ai|nus|bare|hub|conv> [\"text\"] [duration] [--mic]\n", stderr)
+    fputs("       even [-v] bond [duration]\n", stderr)
     exit(2)
 }
 
 let cmd = rawArgs[0]
 
 if cmd == "version" || cmd == "--version" {
-    print("even 0.6.0")
+    print("even 0.7.0")
     exit(0)
 }
 
@@ -63,6 +65,24 @@ case "notify":
 case "dump":
     let duration = rawArgs.count >= 2 ? TimeInterval(rawArgs[1]) ?? 30 : 30
     exit(ble.dump(duration: duration))
+case "bond":
+    let bondTimeout: TimeInterval = rawArgs.count >= 2 ? TimeInterval(rawArgs[1]) ?? 30 : 30
+    exit(ble.bond(timeout: bondTimeout))
+case "lab":
+    guard rawArgs.count >= 2 else {
+        fputs("Usage: even lab <ai|nus|bare|conv> [\"text\"] [duration] [--mic]\n", stderr)
+        exit(2)
+    }
+    let display = rawArgs[1]
+    let mic = rawArgs.contains("--mic")
+    var labArgs = Array(rawArgs[2...].filter { $0 != "--mic" })
+    var labDuration: TimeInterval = 30
+    if labArgs.count > 0, let d = TimeInterval(labArgs.last!) {
+        labDuration = d
+        labArgs = Array(labArgs.dropLast())
+    }
+    let labText = labArgs.joined(separator: " ")
+    exit(ble.lab(display: display, text: labText, mic: mic, duration: labDuration))
 default:
     fputs("Unknown command: \(cmd)\n", stderr)
     exit(2)
